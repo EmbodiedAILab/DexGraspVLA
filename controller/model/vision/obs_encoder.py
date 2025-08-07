@@ -24,7 +24,7 @@ class ObsEncoder(ModuleAttrMixin):
 
         if model_config['head']['local_weights_path'] is None:
             self.dino_head = torch.hub.load(
-                "facebookresearch/dinov2",
+                "facebookresearch/dinov2:qasfb-patch-3",
                 model_config['head']['model_type'],
                 pretrained=True,
                 force_reload=False,
@@ -44,7 +44,7 @@ class ObsEncoder(ModuleAttrMixin):
 
         if model_config['wrist']['local_weights_path'] is None:
             self.dino_wrist = torch.hub.load(
-                "facebookresearch/dinov2",
+                "facebookresearch/dinov2:qasfb-patch-3",
                 model_config['wrist']['model_type'],
                 pretrained=True,
                 force_reload=False,
@@ -124,7 +124,8 @@ class ObsEncoder(ModuleAttrMixin):
 
         # Create state_net to process robot arm and dexterous hand states
         self.state_net = nn.Sequential(
-            nn.Linear(13, 256),
+            #nn.Linear(13, 256),
+            nn.Linear(7, 256),
             nn.LayerNorm(256),
             nn.GELU(),
             nn.Dropout(0.1),

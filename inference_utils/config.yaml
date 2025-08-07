@@ -29,14 +29,14 @@ robot:
 cameras:
   right_first:
     sn: null
-    resolution: [640, 480]
+    resolution: [640, 360]
   third:
     sn: null
-    resolution: [640, 480]
+    resolution: [640, 360]
 
 # Model Configuration
 sam:
-  checkpoint: null
+  checkpoint: /home/cwh/.cache/sam/sam_vit_h_4b8939.pth
   model_type: "vit_h"
 
 planner:
