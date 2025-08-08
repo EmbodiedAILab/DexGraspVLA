@@ -1,7 +1,7 @@
-name: grasp
+name: pnp
 
-image_shape: [3, 360, 640]
-mask_image_shape: [4, 360, 640]
+image_shape: [3, 518, 518]
+mask_image_shape: [4, 518, 518]
 dataset_paths:
  - /home/cwh/data/r1_pnp/zarr
 

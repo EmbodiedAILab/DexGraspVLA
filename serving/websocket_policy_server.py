@@ -2,8 +2,7 @@ import asyncio
 import logging
 import traceback
 
-from openpi_client import base_policy as _base_policy
-import  msgpack_numpy
+from serving import base_policy as _base_policy, msgpack_numpy
 import websockets.asyncio.server
 import websockets.frames
 
@@ -19,7 +18,7 @@ class WebsocketPolicyServer:
         policy: _base_policy.BasePolicy,
         host: str = "0.0.0.0",
         port: int = 8000,
-        metadata: dict | None = None,
+        metadata: dict = None,
     ) -> None:
         self._policy = policy
         self._host = host
@@ -46,14 +45,17 @@ class WebsocketPolicyServer:
 
         await websocket.send(packer.pack(self._metadata))
         self._policy.reset()
+        self._policy.init_episode(manual=True)
 
         while True:
             try:
                 obs = msgpack_numpy.unpackb(await websocket.recv())
-                action = self._policy.infer(obs)
-                await websocket.send(packer.pack(action))
+                actions = self._policy.infer(obs)
+                response = {"actions": actions}
+                await websocket.send(packer.pack(response))
             except websockets.ConnectionClosed:
                 logging.info(f"Connection from {websocket.remote_address} closed")
+                self._policy.close_episode()
                 break
             except Exception:
                 await websocket.send(traceback.format_exc())

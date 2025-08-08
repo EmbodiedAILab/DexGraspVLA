@@ -5,9 +5,11 @@ import logging
 import os
 import socket
 import time
+from datetime import datetime
 from typing_extensions import override
 
 import yaml
+import cv2
 import h5py
 import hydra
 import matplotlib.pyplot as plt
@@ -29,8 +31,15 @@ from inference_utils.utils import (cubic_spline_interpolation_7d, clear_input_bu
 
 from serving import websocket_policy_server
 from serving.base_policy import BasePolicy
-from serving.dexgraspvla_policy_adaptor import DexGraspVLAPolicyAdaptor
 
+# Register now resolver
+def now_resolver(pattern: str):
+    """Handle ${now:} time formatting"""
+    return datetime.now().strftime(pattern)
+
+# Register resolvers
+OmegaConf.register_new_resolver("now", now_resolver, replace=True)
+OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 class DexGraspVLAPolicy(BasePolicy):
     def __init__(self, args):
@@ -44,8 +53,8 @@ class DexGraspVLAPolicy(BasePolicy):
         # print("init_robot_state done")
         self.init_controller()
         print("init_controller done")
-        self.init_planner()
-        print("init_planner done")
+        # self.init_planner()
+        # print("init_planner done")
         self.init_utils_and_data()
         print("init_utils_and_data done")
         # self.init_threads()
@@ -110,8 +119,8 @@ class DexGraspVLAPolicy(BasePolicy):
     def init_controller(self):
         self.device = torch.device('cuda:0')
 
-        main_config_path = os.path.join(os.path.dirname(__file__), 'controller', 'config', 'train_dexgraspvla_controller_workspace.yaml')
-        task_config_path = os.path.join(os.path.dirname(__file__), 'controller', 'config', 'task', 'grasp.yaml')
+        main_config_path = os.path.join(os.path.dirname(__file__), 'controller', 'config', 'train_dexgraspvla_controller_workspace_pnp.yaml')
+        task_config_path = os.path.join(os.path.dirname(__file__), 'controller', 'config', 'task', 'pnp.yaml')
         
         self.cfg = load_config(
             main_config_path=main_config_path,
@@ -149,7 +158,7 @@ class DexGraspVLAPolicy(BasePolicy):
         resolution = self.config['cameras']['right_first']['resolution']
         self.right_first_color_image_buffer = np.zeros((self.cfg.n_obs_steps, resolution[1], resolution[0], 3))
         self.third_color_image_buffer = np.zeros((self.cfg.n_obs_steps, resolution[1], resolution[0], 4))
-        self.state_buffer = np.zeros((self.cfg.n_obs_steps, 13))
+        self.state_buffer = np.zeros((self.cfg.n_obs_steps, 7))
         self.height_threshold = 0
 
 
@@ -306,9 +315,11 @@ class DexGraspVLAPolicy(BasePolicy):
         # else:
         #     self.run_planner()
         if self.time_step==0:
-            bbox = self.mark_bbox_manual(obs['images']['cam_high'])
-            self.initialize_sam_cutie(bbox)
-            self.reset_flags()
+            head_img = obs['images']['cam_high']
+            print(head_img.shape, type(head_img))
+            bbox = self.mark_bbox_manual(head_img)
+            self.initialize_sam_cutie(head_img, bbox)
+            # self.reset_flags()
             clear_input_buffer()
             self.log("Controller starts executing the current instruction.", message_type="info")
         #state = self.get_state()
@@ -322,6 +333,7 @@ class DexGraspVLAPolicy(BasePolicy):
         with torch.no_grad():
             action_pred = self.policy.predict_action(obs_dict, attn_map_output_path)
         action = action_pred[0].detach().to('cpu').numpy()
+        print(f'action: {action}')
         return action
 
     @override
@@ -466,7 +478,7 @@ class DexGraspVLAPolicy(BasePolicy):
         self.log("Head camera image saved at the beginning of the episode.", message_type="info")
         # Display image and get bounding box
         plt.figure()
-        plt.imshow(third_color_image[..., ::-1])  # The image is BGR
+        plt.imshow(third_color_image)  # The image is BGR
         plt.axis('off')
         plt.title("Please click two points to define the bounding box (top left and bottom right)")
         bbox_points = plt.ginput(n=2, timeout=0)
@@ -477,20 +489,20 @@ class DexGraspVLAPolicy(BasePolicy):
         # Save image with bounding box
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         img_with_bbox_filename = f"{timestamp}_head_image_with_bbox.png"
-        self.show_and_save_image_with_bbox(third_color_image[..., ::-1], bbox, img_with_bbox_filename)
+        self.show_and_save_image_with_bbox(third_color_image, bbox, img_with_bbox_filename)
         return bbox
     
 
-    def initialize_sam_cutie(self, bbox):
+    def initialize_sam_cutie(self, third_color_image, bbox):
         self.processor.clear_memory()
         torch.cuda.empty_cache()
-        self.predictor.set_image(self.third_color_image[..., ::-1])
+        self.predictor.set_image(third_color_image)
 
         masks, scores, _ = self.predictor.predict(box=bbox, multimask_output=True)
         self.best_mask = masks[np.argmax(scores)]
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         img_with_mask_filename = f"{timestamp}_head_image_with_mask.png"
-        self.show_and_save_image_with_mask(self.third_color_image[..., ::-1], self.best_mask, img_with_mask_filename)
+        self.show_and_save_image_with_mask(third_color_image, self.best_mask, img_with_mask_filename)
 
         # Reinitialize Cutie
         self.mask = torch.from_numpy(self.best_mask.astype('uint8')).cuda()
@@ -677,7 +689,7 @@ class DexGraspVLAPolicy(BasePolicy):
     def get_mask(self, third_color_image):
         # Update Cutie mask
         with torch.no_grad():
-            image_tensor = to_tensor(third_color_image[..., ::-1].copy()).cuda().float()
+            image_tensor = to_tensor(third_color_image.copy()).cuda().float()
             if self.cutie_initialized == False:
                 output_prob = self.processor.step(image_tensor, self.mask, objects=self.objects)
                 self.cutie_initialized = True
@@ -691,18 +703,18 @@ class DexGraspVLAPolicy(BasePolicy):
     def get_obs(self, state, mask):
         # Update image buffer
         self.third_color_image_with_mask = np.concatenate([
-            self.third_color_image,
+            state['images']['cam_high'],
             mask[..., None]
         ], axis=-1)
         self.right_first_color_image_buffer = update_array(
             self.right_first_color_image_buffer, 
-            self.right_first_color_image.copy()
+            state['images']['cam_right_wrist'].copy()
         )
         self.third_color_image_buffer = update_array(
             self.third_color_image_buffer, 
             self.third_color_image_with_mask
         )
-        self.state_buffer = update_array(self.state_buffer, state)
+        self.state_buffer = update_array(self.state_buffer, state['state'])
         obs = {"right_cam_img": self.right_first_color_image_buffer, "rgbm": self.third_color_image_buffer, "right_state": self.state_buffer}
         return obs
     
@@ -967,6 +979,51 @@ class DexGraspVLAPolicy(BasePolicy):
         finally:
             print("System shutdown complete.")
 
+    def _process_mask_image(self, image):
+        """Process images in batch"""
+        rgb = torch.from_numpy(image[..., :3]).float()  # [T, H, W, 3]
+        mask = torch.from_numpy(image[..., 3:]).float() # [T, H, W, 1]
+        
+        # Process RGB
+        rgb = rgb.permute(2, 0, 1)  # [T, 3, H, W]
+
+        rgb = F.interpolate(
+            rgb / 255.0,
+            size=self.image_size,
+            mode='bilinear',
+            align_corners=False
+        )
+
+        # Process mask
+        mask = mask.permute(2, 0, 1)  # [T, 1, H, W]
+        mask = F.interpolate(
+            mask,
+            size=self.image_size,
+            mode='nearest'
+        )
+
+        mask = (mask > 0.5).float()
+
+        # Combine
+        combined = torch.cat([rgb, mask], dim=1)  # [T, 4, H, W]
+        return combined.numpy()
+
+    def _process_image(self, image):
+        """Process images in batch"""
+        rgb = torch.from_numpy(image[..., :3]).float()  # [T, H, W, 3]
+        
+        # Process RGB
+        rgb = rgb.permute(2, 0, 1)  # [T, 3, H, W]
+
+        rgb = F.interpolate(
+            rgb / 255.0,
+            size=self.image_size,
+            mode='bilinear',
+            align_corners=False
+        )
+
+        return rgb.numpy()
+
 
 def main(args) -> None:
     policy = DexGraspVLAPolicy(args)
@@ -981,7 +1038,7 @@ def main(args) -> None:
     server = websocket_policy_server.WebsocketPolicyServer(
         policy=policy,
         host="0.0.0.0",
-        port=args.port,
+        port=8000,
     )
     server.serve_forever()
 
