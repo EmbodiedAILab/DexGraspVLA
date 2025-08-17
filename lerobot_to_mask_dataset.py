@@ -21,11 +21,14 @@ from typing import Dict, List, Optional, Tuple, Any
 import torch
 import torch.nn.functional as F
 from torchvision.transforms.functional import to_tensor
+import traceback
 
 # Computer vision model imports
 from cutie.inference.inference_core import InferenceCore
 from cutie.utils.get_default_model import get_default_model
 from segment_anything import sam_model_registry, SamPredictor
+from planner.dexgraspvla_planner import DexGraspVLAPlanner
+from inference_utils.utils import get_image_url
 
 # LeRobot imports
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
@@ -43,8 +46,8 @@ class LeRobotDatasetConverter:
                  dataset_id: str,
                  output_path: str,
                  image_size: Tuple[int, int] = (518, 518),
-                 max_episodes: Optional[int] = None,
-                 val_ratio: float = 0.1,
+                 prompt: Optional[str] = None,
+                 manual: bool = False,
                  root: Optional[str] = None):
         """
         Initialize the converter
@@ -60,8 +63,8 @@ class LeRobotDatasetConverter:
         self.dataset_id = dataset_id
         self.output_path = Path(output_path)
         self.image_size = image_size
-        self.max_episodes = max_episodes
-        self.val_ratio = val_ratio
+        self.prompt = prompt
+        self.manual = manual
         self.root = root
         
         # Create output directory
@@ -72,9 +75,14 @@ class LeRobotDatasetConverter:
         os.makedirs(self.img_dir, exist_ok=True)
         self.log_file_path = os.path.join(output_path, 'run.log')
         self.log_file = open(self.log_file_path, 'w')
-        
+        self.base_url = "http://1.95.39.151:1025/v1"
+        self.model = "qwen2_vl"
+        self.bboxes= []
+
         # Initialize dataset
         self.dataset = LeRobotDataset(self.dataset_id, root=self.root,local_files_only=True)
+        self.planner = DexGraspVLAPlanner(base_url=self.base_url, model_name=self.model)
+        self.planner.set_logging(self.log_file, self.img_dir)
 
         self.init_controller()
 
@@ -105,26 +113,65 @@ class LeRobotDatasetConverter:
         self.processor = InferenceCore(self.cutie, cfg=self.cutie.cfg)
         self.processor.max_internal_size = -1
 
-    def mark_bbox_manual(self, third_color_image):
+    def mark_bbox_manual(self, third_color_image, id):
         # Save original image
         self.save_image(third_color_image, "head_image_start")
         self.log("Head camera image saved at the beginning of the episode.", message_type="info")
+        img_url = get_image_url(third_color_image)
+
+        # Get bounding box by using qwen2_vl model
+        vl_inputs={"images":{}}
+        vl_inputs["images"]["current_head_image"] = img_url
+        vl_inputs["grasping_instruction"] = self.prompt  #'Grasp the blue plug on the table.'
+
+        bbox_json = self.planner.request_task(task_name="bounding_box_prediction", vl_inputs=vl_inputs)
+        bbox = bbox_json['bbox_2d']
+        bbox = np.array(bbox)
         # Display image and get bounding box
-        plt.figure()
-        plt.imshow(third_color_image)  # The image is BGR
-        plt.axis('off')
-        plt.title("Please click two points to define the bounding box (top left and bottom right)")
-        bbox_points = plt.ginput(n=2, timeout=0)
-        plt.close()
-        (x1, y1), (x2, y2) = bbox_points
-        bbox = np.array([min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)])
+        # plt.figure()
+        bbox_points = self.show_image_with_bbox(third_color_image, bbox, id)
+        
+        if len(bbox_points) == 2:
+            (x1, y1), (x2, y2) = bbox_points
+            bbox = np.array([min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)])
 
         # Save image with bounding box
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         img_with_bbox_filename = f"{timestamp}_head_image_with_bbox.png"
         self.show_and_save_image_with_bbox(third_color_image, bbox, img_with_bbox_filename)
         return bbox
+    
+    def mark_bbox_auto(self, head_img):
+        """Mark bounding box on the image using qwen2_vl model
+        
+        Args:
+            head_img: The image to mark bounding box on
+            ip_address: IP address of the qwen2_vl server
+            port: Port of the qwen2_vl server
+            model_name: Model name to use for bounding box prediction
+        Returns:
+            bbox: The array of bounding box coordinates [x1, y1, x2, y2]
+        """     
+        # Save original image
+        self.save_image(head_img, "head_image_start")
+        img_url = get_image_url(head_img)
+        self.log("Head camera image saved at the beginning of the episode.", message_type="info")
 
+        # Get bounding box by using qwen2_vl model
+        vl_inputs={"images":{}}
+        vl_inputs["images"]["current_head_image"] = img_url
+        vl_inputs["grasping_instruction"] = self.prompt  #'Grasp the blue plug on the table.'
+
+        bbox_json = self.planner.request_task(task_name="bounding_box_prediction", vl_inputs=vl_inputs)
+        bbox = bbox_json['bbox_2d']
+        bbox = np.array(bbox)
+
+        # Save image with bounding box
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        img_with_bbox_filename = f"{timestamp}_head_image_with_bbox.png"
+        self.show_and_save_image_with_bbox(head_img, bbox, img_with_bbox_filename)
+        return bbox
+    
     def initialize_sam_cutie(self, third_color_image, bbox):
         self.processor.clear_memory()
         torch.cuda.empty_cache()
@@ -143,7 +190,42 @@ class LeRobotDatasetConverter:
         self.objects = self.objects[self.objects != 0].tolist()
         self.cutie_initialized = False 
 
-    
+    def show_image_with_bbox(self, image, bbox, id):
+        """Save and display image with bounding box
+        
+        Args:
+            image: Original image
+            bbox: Bounding box coordinates [x1, y1, x2, y2]
+            filename: Filename to save
+        """
+        # Create an image with the same size as the original
+        height, width = image.shape[:2]
+        fig = plt.figure(num=f'episode {id}', figsize=(width/100, height/100), dpi=100)
+        ax = plt.Axes(fig, [0., 0., 1., 1.])  # Create axes without margins
+        ax.set_axis_off()
+        fig.add_axes(ax)
+        
+        # Display image
+        ax.imshow(image)
+        
+        # Get bounding box color and line width from config
+        bbox_color = self.config['visualization']['bbox']['color']
+        bbox_linewidth = self.config['visualization']['bbox']['linewidth']
+        
+        # Draw bounding box
+        x1, y1, x2, y2 = bbox.astype(int)
+        rect = plt.Rectangle((x1, y1), x2-x1, y2-y1, 
+                            linewidth=bbox_linewidth, 
+                            edgecolor=bbox_color, 
+                            facecolor='none')
+        ax.add_patch(rect)
+        plt.draw()
+        # plt.axis('off')
+        plt.title("Please click two points to define the bounding box (top left and bottom right)")
+        bbox_points = plt.ginput(n=2, timeout=0)
+        plt.close()
+        return bbox_points
+
 
     def show_and_save_image_with_bbox(self, image, bbox, filename):
         """Save and display image with bounding box
@@ -342,7 +424,7 @@ class LeRobotDatasetConverter:
         # self.show_and_save_image_with_mask(rgb, mask, img_with_mask_filename)
         return np.concatenate([rgb, mask[..., None]], axis=-1)
     
-    def _extract_episode_data(self, from_id: int, to_id: int) -> Dict[str, np.ndarray]:
+    def _extract_episode_data(self, episode_idx: int) -> Dict[str, np.ndarray]:
         """Extract data from a single episode using LeRobot API"""
         actions = []
         states = []
@@ -351,8 +433,10 @@ class LeRobotDatasetConverter:
         
         # Get episode length
         #episode_length = len(episode_data.get('action', []))
+        episode_from_idx = self.dataset.episode_data_index['from'][episode_idx]
+        episode_to_idx = self.dataset.episode_data_index['to'][episode_idx]
 
-        for idx in range(from_id, to_id):
+        for idx in range(episode_from_idx, episode_to_idx):
             episode_data = self.dataset[idx]
             # Extract action and state
             if 'action' in episode_data:
@@ -369,8 +453,12 @@ class LeRobotDatasetConverter:
                 head_img = episode_data['observation.images.front'].permute(1, 2, 0).numpy()
                 if head_img.max() <= 1.0:
                     head_img = (head_img * 255).astype(np.uint8)
-                if idx == from_id:
-                    bbox = self.mark_bbox_manual(head_img)
+                if idx == episode_from_idx:
+                    if self.manual:
+                        bbox = self.bboxes[episode_idx]
+                    else:
+                        bbox = self.mark_bbox_auto(head_img)
+                        print(bbox)
                     self.initialize_sam_cutie(head_img, bbox)
                 mask = self._create_mask_from_rgb(head_img)
                 rgbm_img = self._combine_rgb_and_mask(head_img, mask)
@@ -389,6 +477,14 @@ class LeRobotDatasetConverter:
             'rgbm': np.array(rgbm_images, dtype=np.uint8)
         }
     
+    def _mask_first_head_img(self, episode_idx: int):
+        episode_from_idx = self.dataset.episode_data_index['from'][episode_idx].item()
+        head_img = self.dataset[episode_from_idx]['observation.images.front'].permute(1, 2, 0).numpy()
+        if head_img.max() <= 1.0:
+            head_img = (head_img * 255).astype(np.uint8)
+        bbox = self.mark_bbox_manual(head_img, episode_idx)
+        self.bboxes.append(bbox)
+
     def _get_episode_boundaries(self) -> List[Tuple[int, int]]:
         """Get episode boundaries from dataset"""
         episode_ends = self.dataset.episode_ends
@@ -421,14 +517,16 @@ class LeRobotDatasetConverter:
         buffer = ReplayBuffer.create_empty_zarr(storage=zarr.DirectoryStore(str(self.output_path)))
         
         total_samples = 0
+        if self.manual:
+            for episode_idx in range(n_episodes):
+                self._mask_first_head_img(episode_idx)
         for episode_idx in range(n_episodes):
             print(f"Processing episode {episode_idx + 1}/{n_episodes}")
             try:
                 # Extract episode data using LeRobotDataset API
-                episode_from_idx = self.dataset.episode_data_index['from'][episode_idx]
-                episode_to_idx = self.dataset.episode_data_index['to'][episode_idx]
+                
                 # episode_data = self.dataset[episode_from_idx:episode_to_idx]
-                processed_data = self._extract_episode_data(episode_from_idx, episode_to_idx)
+                processed_data = self._extract_episode_data(episode_idx)
                 if len(processed_data['action']) == 0:
                     print(f"Warning: Episode {episode_idx} has no action data, skipping")
                     continue
@@ -437,6 +535,7 @@ class LeRobotDatasetConverter:
                 total_samples += len(processed_data['action'])
             except Exception as e:
                 print(f"Error processing episode {episode_idx}: {e}")
+                traceback.print_exc()
                 continue
         if buffer.n_episodes == 0:
             raise ValueError("No valid episodes found!")
@@ -446,7 +545,6 @@ class LeRobotDatasetConverter:
             'n_episodes': buffer.n_episodes,
             'total_samples': total_samples,
             'image_size': self.image_size,
-            'val_ratio': self.val_ratio,
             'action_dim': buffer.data['action'].shape[1],
             'state_dim': buffer.data['right_state'].shape[1],
             'dataset_info': dataset_info
@@ -470,10 +568,8 @@ def main():
                        help='Output path for Zarr dataset')
     parser.add_argument('--image-size', type=int, nargs=2, default=[518, 518],
                        help='Target image size (H W)')
-    parser.add_argument('--max-episodes', type=int, default=None,
-                       help='Maximum number of episodes to convert')
-    parser.add_argument('--val-ratio', type=float, default=0.1,
-                       help='Validation set ratio')
+    parser.add_argument('--prompt', type=str, default=None, help='Input prompt to mark bbox')
+    parser.add_argument('--manual', action='store_true', help='Manually select the target object.')
     parser.add_argument('--root', type=str, default=None,
                        help='Local dataset root path (if dataset is local)')
     
@@ -484,8 +580,8 @@ def main():
         dataset_id=args.dataset_id,
         output_path=args.output,
         image_size=tuple(args.image_size),
-        max_episodes=args.max_episodes,
-        val_ratio=args.val_ratio,
+        prompt = args.prompt,
+        manual=args.manual,
         root=args.root
     )
     
