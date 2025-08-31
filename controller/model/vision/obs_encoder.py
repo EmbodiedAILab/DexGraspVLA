@@ -125,7 +125,7 @@ class ObsEncoder(ModuleAttrMixin):
         # Create state_net to process robot arm and dexterous hand states
         self.state_net = nn.Sequential(
             #nn.Linear(13, 256),
-            nn.Linear(7, 256),
+            nn.Linear(14, 256),
             nn.LayerNorm(256),
             nn.GELU(),
             nn.Dropout(0.1),
@@ -209,11 +209,12 @@ class ObsEncoder(ModuleAttrMixin):
         embeddings = list()
         embeddings.append(self.forward_head(obs_dict['rgbm'], training))  # (B,T*num_patches,feature_dim)
         embeddings.append(self.forward_wrist(obs_dict['right_cam_img'], training))  # (B,T*num_patches,feature_dim)
-        embeddings.append(self.forward_state(obs_dict['right_state']))  # (B,T,feature_dim)
+        embeddings.append(self.forward_wrist(obs_dict['left_cam_img'], training))
+        embeddings.append(self.forward_state(obs_dict['state']))  # (B,T,feature_dim)
         
         # Concatenate all features along sequence length dimension
         return torch.cat(embeddings, dim=1)  # (B,T*(num_patches*2+1),feature_dim)
 
     @torch.no_grad()
     def output_shape(self):
-        return (1, 2739, self.feature_dim), [1369, 1369, 1]
+        return (1, 4108, self.feature_dim), [1369, 1369, 1369, 1]

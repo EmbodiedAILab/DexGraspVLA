@@ -1,0 +1,40 @@
+name: r1_picking
+
+image_shape: [3, 518, 518]
+mask_image_shape: [4, 518, 518]
+dataset_paths:
+  - /data/cwh/r1_picking_sim_0816_2/zarr/r1_picking_sim_0816_2
+
+shape_meta: &shape_meta
+  obs:
+    right_cam_img:
+      shape: ${task.image_shape}
+      type: rgb
+      horizon: ${n_obs_steps}
+    left_cam_img:
+      shape: ${task.image_shape}
+      type: rgb
+      horizon: ${n_obs_steps}
+    rgbm:
+      shape: ${task.mask_image_shape}
+      type: rgbm
+      horizon: ${n_obs_steps}
+    state:
+      shape: [14]
+      type: low_dim
+      horizon: ${n_obs_steps}
+  action:
+    shape: [14]
+    horizon: ${n_action_steps}
+
+env_runner:
+  _target_: controller.env_runner.real_grasp_image_runner.RealGraspImageRunner
+
+dataset:
+  _target_: controller.dataset.mask_image_dataset.MaskImageDataset
+  zarr_paths: ${task.dataset_paths}
+  horizon: ${n_action_steps}
+  pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0

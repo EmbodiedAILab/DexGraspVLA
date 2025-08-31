@@ -36,7 +36,7 @@ class MaskImageDataset(BaseImageDataset):
         for zarr_path in zarr_paths:
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
-                zarr_path, keys=['right_cam_img', 'rgbm', 'right_state', 'action'])
+                zarr_path, keys=['right_cam_img','left_cam_img','rgbm', 'state', 'action'])
             self.replay_buffers.append(replay_buffer)
             
             # Create train mask
@@ -136,18 +136,20 @@ class MaskImageDataset(BaseImageDataset):
         return rgb.numpy()
     
     def _sample_to_data(self, sample):
-        right_state = sample['right_state'].astype(np.float32)
+        right_state = sample['state'].astype(np.float32)
         T_slice = slice(self.n_obs_steps)
 
         # Process all images in batch
         mask_processed_frames = self._process_mask_image_batch(sample['rgbm'][T_slice])
         processed_frames = self._process_image_batch(sample['right_cam_img'][T_slice])
+        left_processed_frames = self._process_image_batch(sample['left_cam_img'][T_slice])
 
         data = {
             'obs': {
                 'rgbm': mask_processed_frames,
                 'right_cam_img': processed_frames,
-                'right_state': right_state[T_slice]
+                'left_cam_img': left_processed_frames,
+                'state': right_state[T_slice]
             },
             'action': sample['action'].astype(np.float32)
         }
@@ -159,11 +161,11 @@ class MaskImageDataset(BaseImageDataset):
         right_states = []
         for rb in self.replay_buffers:
             actions.append(rb['action'])
-            right_states.append(rb['right_state'])
+            right_states.append(rb['state'])
             
         data = {
             'action': np.concatenate(actions, axis=0),
-            'right_state': np.concatenate(right_states, axis=0)
+            'state': np.concatenate(right_states, axis=0)
         }
         
         normalizer = LinearNormalizer()

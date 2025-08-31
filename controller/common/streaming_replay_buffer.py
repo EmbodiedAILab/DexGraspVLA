@@ -57,7 +57,7 @@ class StreamingReplayBuffer(ReplayBuffer):
         for key in keys:
             arr = src_data[key]
             # Use references for image data, load other data completely
-            if key in ['rgbm', 'right_cam_img']:
+            if key in ['rgbm', 'right_cam_img', 'left_cam_img']:
                 buffer._data[key] = ZarrImageReference(arr)
             else:
                 buffer._data[key] = arr[:]
