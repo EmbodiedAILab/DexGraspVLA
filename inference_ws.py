@@ -157,8 +157,9 @@ class DexGraspVLAPolicy(BasePolicy):
         os.makedirs(self.record_dir, exist_ok=True)
         resolution = self.config['cameras']['right_first']['resolution']
         self.right_first_color_image_buffer = np.zeros((self.cfg.n_obs_steps, resolution[1], resolution[0], 3))
+        self.left_first_color_image_buffer = np.zeros((self.cfg.n_obs_steps, resolution[1], resolution[0], 3))
         self.third_color_image_buffer = np.zeros((self.cfg.n_obs_steps, resolution[1], resolution[0], 4))
-        self.state_buffer = np.zeros((self.cfg.n_obs_steps, 7))
+        self.state_buffer = np.zeros((self.cfg.n_obs_steps, 14))
         self.height_threshold = 0
 
 
@@ -710,12 +711,16 @@ class DexGraspVLAPolicy(BasePolicy):
             self.right_first_color_image_buffer, 
             state['images']['cam_right_wrist'].copy()
         )
+        self.left_first_color_image_buffer = update_array(
+            self.left_first_color_image_buffer, 
+            state['images']['cam_left_wrist'].copy()
+        )
         self.third_color_image_buffer = update_array(
             self.third_color_image_buffer, 
             self.third_color_image_with_mask
         )
         self.state_buffer = update_array(self.state_buffer, state['state'])
-        obs = {"right_cam_img": self.right_first_color_image_buffer, "rgbm": self.third_color_image_buffer, "right_state": self.state_buffer}
+        obs = {"right_cam_img": self.right_first_color_image_buffer, "left_cam_img":self.left_first_color_image_buffer, "rgbm": self.third_color_image_buffer, "state": self.state_buffer}
         return obs
     
 
@@ -729,7 +734,7 @@ class DexGraspVLAPolicy(BasePolicy):
             shape = attr.get('shape')
 
             if type == 'rgb':
-                imgs_in = env_obs[key]
+                    imgs_in = env_obs[key]
                 rgb = torch.from_numpy(imgs_in[..., :3]).float()  # [T, H, W, 3]
                 rgb = rgb.permute(0, 3, 1, 2)  # [T, 3, H, W]
                 # Scale image
